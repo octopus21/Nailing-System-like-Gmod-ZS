@@ -4,7 +4,9 @@
 
 #define PLUGIN_AUTHOR ""
 #define PLUGIN_VERSION "0.00"
-
+#define EF_BONEMERGE                (1 << 0)
+#define EF_NOSHADOW                 (1 << 4)
+#define EF_PARENT_ANIMATES          (1 << 9)
 #include <sourcemod>
 #include <sdktools>
 #include <tf2>
@@ -26,7 +28,7 @@ int g_offsCollisionGroup;
 bool IsPropBeingHeld[2048 + 1] =  { false, ... };
 int g_iHoldingClient[MAXPLAYERS + 1]; //The player who is holding the prop.
 bool g_bIsClientHoldingProp[MAXPLAYERS + 1];
-
+float gDistance[MAXPLAYERS + 1];
 
 
 public void OnPluginStart()
@@ -60,6 +62,7 @@ public Action OnPlayerRunCmd(client, &buttons) {
 			}
 		}
 	}
+	/*
 	if ((buttons & IN_RELOAD)) {
 		//TraceRayToEntityToConfirmNail(client, 90.0);
 		//float vec[3];
@@ -74,7 +77,38 @@ public Action OnPlayerRunCmd(client, &buttons) {
 				SetEntData(client, g_offsCollisionGroup, 3, 4, true);
 			}
 		}
+		
+		int grabbed = TraceRayToEntity(client, 80.0);
+		if (grabbed != -1) {
+			//SetEntPropEnt(grabbed, Prop_Data, "m_hPhysicsAttacker", client);
+			AcceptEntityInput(grabbed, "EnableMotion");
+			SetEntityMoveType(grabbed, MOVETYPE_VPHYSICS);
+			
+			float VecPos_grabbed[3]; float VecPos_client[3];
+			GetEntPropVector(grabbed, Prop_Send, "m_vecOrigin", VecPos_grabbed);
+			GetClientEyePosition(client, VecPos_client);
+			gDistance[client] = GetVectorDistance(VecPos_grabbed, VecPos_client);
+			float vecView[3]; float vecFwd[3]; float vecPos[3]; float vecVel[3];
+			
+			GetClientEyeAngles(client, vecView);
+			GetAngleVectors(vecView, vecFwd, NULL_VECTOR, NULL_VECTOR);
+			GetClientEyePosition(client, vecPos);
+			
+			vecPos[0] += vecFwd[0] * gDistance[client];
+			vecPos[1] += vecFwd[1] * gDistance[client];
+			vecPos[2] += vecFwd[2] * gDistance[client];
+			
+			GetEntPropVector(grabbed, Prop_Send, "m_vecOrigin", vecFwd);
+			
+			SubtractVectors(vecPos, vecFwd, vecVel);
+			ScaleVector(vecVel, 10.0);
+			
+			TeleportEntity(grabbed, NULL_VECTOR, NULL_VECTOR, vecVel);
+			
+			//TeleportEntity(grabbed, NULL_VECTOR, NULL_VECTOR, Float: { 0.0, 0.0, 0.0 } );
+		}
 	}
+	*/
 }
 
 //This for physical entities
@@ -143,9 +177,9 @@ stock int EntityNailAttachTo(int client, int iEnt) {
 	g_bCount[iEnt]++;
 	char oldEntName[64];
 	char classNameCheck[64];
+	char classname2[64];
 	GetEntityClassname(iEnt, classNameCheck, sizeof(classNameCheck));
 	if (StrContains(classNameCheck, "physics", false) != -1) {
-		PrintHintText(client, "Succesfully nailed classname :%s", classNameCheck);
 		GetEntPropString(iEnt, Prop_Data, "m_iName", oldEntName, sizeof(oldEntName));
 		float end[3];
 		float start[3];
@@ -159,30 +193,50 @@ stock int EntityNailAttachTo(int client, int iEnt) {
 			TR_GetEndPosition(end, INVALID_HANDLE);
 		}
 		char strName[126], strClass[64];
-		GetEntityClassname(iEnt, strClass, sizeof(strClass));
-		Format(strName, sizeof(strName), "%s%i", strClass, iEnt);
-		DispatchKeyValue(iEnt, "targetname", strName);
 		if (g_bCount[iEnt] < 2) {
 			int ent = CreateEntityByName("prop_dynamic_override");
 			DispatchKeyValue(ent, "model", "models/crossbow_bolt.mdl");
 			DispatchKeyValue(ent, "target", strName);
 			DispatchKeyValue(ent, "Mode", "0");
 			DispatchSpawn(ent);
-			
+			TeleportEntity(ent, end, angle, NULL_VECTOR);
+			GetEntityClassname(ent, classname2, sizeof(classname2));
 			SetEntProp(ent, Prop_Data, "m_iHealth", 100);
 			SetEntProp(ent, Prop_Data, "m_takedamage", 2);
-			
-			TeleportEntity(ent, end, angle, NULL_VECTOR);
+			Format(strName, sizeof(strName), "%s%i", strClass, iEnt);
+			DispatchKeyValue(iEnt, "targetname", strName);
+			SetVariantString(strName);
+			AcceptEntityInput(ent, "SetParent");
 			TF2_CreateGlow(ent);
 			SetEntPropString(iEnt, Prop_Data, "m_iName", oldEntName);
 			g_eReleaseFreeze[iEnt] = false; //Cuz it's nailed
+			PrintHintText(client, "Succesfully nailed classname :%s, PropId:%d, With:%d/Classname:%s", classNameCheck, iEnt, ent, classname2);
 			EmitSoundToAll("weapons/crowbar/crowbar_impact1.wav", client, SNDCHAN_AUTO, SNDLEVEL_NORMAL, SND_NOFLAGS, SNDVOL_NORMAL, 100, client, end, NULL_VECTOR, true, 0.0);
+			return ent;
 		}
+		HookSingleEntityOutput(iEnt, "OnBreak", propBreak);
 	} else {
 		PrintHintText(client, "Failed at nailing classname:%s", classNameCheck);
 	}
 }
-
+stock int AttachTo(int iEnt) {
+	char classname[64];
+	float StartPos[3];
+	float Below[3];
+	
+	GetEntityClassname(iEnt, classname, sizeof(classname));
+	if (StrContains(classname, "physics", false) != -1 && !g_eReleaseFreeze[iEnt]) {
+		GetEntPropVector(iEnt, Prop_Send, "m_vecOrigin", StartPos);
+		Below[0] = StartPos[0];
+		Below[1] = StartPos[1];
+		Below[2] = StartPos[2] - 10.0;
+		TR_TraceRayFilter(StartPos, Below, MASK_PLAYERSOLID, RayType_EndPoint, TraceRayDontHitSelf, iEnt);
+		if (TR_DidHit(INVALID_HANDLE)) {
+			int index = TR_GetEntityIndex(INVALID_HANDLE);
+			PrintToChatAll("%d", index);
+		}
+	}
+}
 stock GrabProp(int iClient, int iEnt) {
 	
 }
@@ -220,27 +274,18 @@ stock int TF2_CreateGlow(int iEnt)
 
 UpgradeStatusOfProp(iEntity) {
 	if (iEntity != -1) {
+		HookSingleEntityOutput(iEntity, "OnBreak", propBreak);
 		if (!g_eReleaseFreeze[iEntity]) {
-			SetEntityMoveType(iEntity, MOVETYPE_NONE);
+			//SetEntityMoveType(iEntity, MOVETYPE_NONE);
 			SetEntProp(iEntity, Prop_Data, "m_iHealth", 100);
 			SetEntProp(iEntity, Prop_Data, "m_takedamage", 2);
-			//HookSingleEntityOutput(iEntity, "OnBreak", propBreak, true);
-			SDKHook(iEntity, SDKHook_OnTakeDamage, OnTakeDamage);
 		}
-	}
-}
-public Action OnTakeDamage(victim, &attacker, &inflictor, &Float:damage, &damagetype)
-{
-	int iHealth = GetEntProp(victim, Prop_Data, "m_iHealth");
-	if (iHealth < 10) {
-		PrintToChatAll("Low than 10!");
 	}
 }
 public void propBreak(const char[] output, int caller, int activator, float delay)
 {
-	PrintToChatAll("Prop destroyed!");
-	UnhookSingleEntityOutput(caller, "OnBreak", propBreak);
 	RemoveRemainNails(caller);
+	UnhookSingleEntityOutput(caller, "OnBreak", propBreak);
 }
 
 
@@ -269,14 +314,24 @@ public bool TraceRayHitOnlyEnt(int entity, int contentsMask, any data)
 }
 
 stock RemoveRemainNails(int iEnt) {
-	char m_ModelName[PLATFORM_MAX_PATH];
-	GetEntPropString(iEnt, Prop_Data, "m_ModelName", m_ModelName, sizeof(m_ModelName));
 	int index = -1;
-	while ((index = FindEntityByClassname(index, "prop_dynamic_override")) != -1) {
-		PrintToChatAll("Nail spotted!");
-		if (GetEntPropEnt(index, Prop_Send, "m_hTarget") == iEnt && StrContains(m_ModelName, "bolt", false) != -1) {
+	while ((index = FindEntityByClassname(index, "prop_dynamic")) != -1) {
+		//PrintToChatAll("Nail spotted!");
+		
+		if (GetEntPropEnt(index, Prop_Data, "m_hMoveParent") == iEnt) {
 			AcceptEntityInput(index, "Kill");
-			PrintToChatAll("Nail removed!");
+			PrintToChatAll("Nail Index:%d, Nail parented to :%d", index, iEnt);
 		}
+		//PrintToChatAll("Nail removed!");
 	}
+}
+
+public bool TraceRayDontHitSelf(entity, mask, any:data)
+{
+	if (entity == data) // Check if the TraceRay hit the owning entity.
+	{
+		return false; // Don't let the entity be hit
+	}
+	
+	return true; // It didn't hit itself
 } 
