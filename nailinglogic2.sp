@@ -12,6 +12,7 @@
 #include <tf2>
 #include <tf2_stocks>
 #include <sdkhooks>
+new g_offsCollisionGroup;
 
 public Plugin myinfo = 
 {
@@ -21,96 +22,138 @@ public Plugin myinfo =
 	version = PLUGIN_VERSION, 
 	url = ""
 };
-
-bool g_eReleaseFreeze[2048 + 1] =  { true, ... };
+int g_iPlayerGlowEntity[MAXPLAYERS + 1];
+int g_iMapPrefixType = 0;
+int g_iZomTeamIndex;
+int g_iHumTeamIndex;
 int g_bCount[2048 + 1] =  { 0, ... };
-int g_offsCollisionGroup;
-bool IsPropBeingHeld[2048 + 1] =  { false, ... };
-int g_iHoldingClient[MAXPLAYERS + 1]; //The player who is holding the prop.
-bool g_bIsClientHoldingProp[MAXPLAYERS + 1];
-float gDistance[MAXPLAYERS + 1];
-
-
+bool g_bPropNailed[2048 + 1] =  { false, ... };
+int g_pGrabbedEnt[MAXPLAYERS + 1];
+Handle gTimer;
+bool g_bPropBeingHeld[2048 + 1] =  { false, ... };
 public void OnPluginStart()
 {
 	g_offsCollisionGroup = FindSendPropInfo("CBaseEntity", "m_CollisionGroup");
 	HookEvent("teamplay_round_start", OnRound);
+	HookEvent("player_death", PlayerDeath);
+	HookEvent("player_spawn", PlayerSpawn);
+	RegConsoleCmd("+grab", Command_Grab);
+	RegConsoleCmd("-grab", Command_UnGrab);
 }
+
 public void OnMapStart() {
+	zombimod();
+	logGameRuleTeamRegister();
 	PrecacheModel("models/crossbow_bolt.mdl", true);
 	PrecacheSound("weapons/crowbar/crowbar_impact1.wav", true);
-	for (new i = 1; i <= 2048; i++) {
-		g_eReleaseFreeze[i] = true;
+	for (int i = 1; i <= 2048; i++) {
 		g_bCount[i] = 0;
+		g_bPropNailed[i] = false;
+		g_bPropBeingHeld[i] = false;
+	}
+	for (int i = 1; i < MAXPLAYERS; i++) {
+		g_pGrabbedEnt[i] = -1;
+	}
+	
+	gTimer = CreateTimer(0.1, UpdateObjects, INVALID_HANDLE, TIMER_REPEAT);
+}
+public OnMapEnd()
+{
+	CloseHandle(gTimer);
+}
+
+
+public OnClientPutInServer(client) {
+	if (client && !IsFakeClient(client)) {
+		g_pGrabbedEnt[client] = -1;
+		g_bPropBeingHeld[client] = false;
 	}
 }
+
 public Action OnRound(Handle event, const String:name[], bool dontBroadcast) {
-	for (new i = 0; i <= 2048; i++) {
-		g_eReleaseFreeze[i] = true;
+	for (int i = 0; i <= 2048; i++) {
 		g_bCount[i] = 0;
+		g_bPropBeingHeld[i] = false;
+	}
+	for (int j = 1; j <= MAXPLAYERS; j++) {
+		if (IsValidClient(j) && IsClientInGame(j)) {
+			g_pGrabbedEnt[j] = -1;
+		}
 	}
 }
+public Action PlayerSpawn(Handle event, const String:name[], bool dontBroadcast)
+{
+	int client;
+	client = GetClientOfUserId(GetEventInt(event, "userid"));
+	// reset object held
+	g_pGrabbedEnt[client] = -1;
+	g_bPropBeingHeld[client] = false;
+	return Plugin_Continue;
+}
+public Action PlayerDeath(Handle event, const String:name[], bool dontBroadcast) {
+	int client;
+	client = GetClientOfUserId(GetEventInt(event, "userid"));
+	// reset object held
+	g_pGrabbedEnt[client] = -1;
+	g_bPropBeingHeld[client] = false;
+	return Plugin_Continue;
+}
+
 public Action OnPlayerRunCmd(client, &buttons) {
 	if ((buttons & IN_ATTACK2)) {
 		int TracedEntity = TraceRayToEntity(client, 80.0);
 		if (TracedEntity != -1) {
 			float vec[3];
 			GetClientEyeAngles(client, vec);
-			if (vec[0] > 46.0) {
+			if (vec[0] > 46.0 && g_pGrabbedEnt[client] == -1 && GetClientTeam(client) == g_iHumTeamIndex) {  //Must look downwards, must not carry anything while nailing anything.
 				EntityNailAttachTo(client, TracedEntity);
 				UpgradeStatusOfProp(TracedEntity);
 			}
 		}
 	}
-	/*
-	if ((buttons & IN_RELOAD)) {
-		//TraceRayToEntityToConfirmNail(client, 90.0);
-		//float vec[3];
-		//GetClientEyeAngles(client, vec);
-		//PrintHintText(client, "X:%f, Y:%f, Z:%f", vec[0], vec[1], vec[2]);
-		int TracedEntity = TraceRayToEntity(client, 100.0);
-		if (TracedEntity != -1) {
-			if (IsPlayerStuckInEnt(client, TracedEntity) && GetClientTeam(client) == 3) {
-				SetEntData(client, g_offsCollisionGroup, 2, 4, true);
-				
-			} else if (!IsPlayerStuckInEnt(client, TracedEntity) && GetClientTeam(client) == 3) {
-				SetEntData(client, g_offsCollisionGroup, 3, 4, true);
-			}
-		}
-		
-		int grabbed = TraceRayToEntity(client, 80.0);
-		if (grabbed != -1) {
-			//SetEntPropEnt(grabbed, Prop_Data, "m_hPhysicsAttacker", client);
-			AcceptEntityInput(grabbed, "EnableMotion");
-			SetEntityMoveType(grabbed, MOVETYPE_VPHYSICS);
-			
-			float VecPos_grabbed[3]; float VecPos_client[3];
-			GetEntPropVector(grabbed, Prop_Send, "m_vecOrigin", VecPos_grabbed);
-			GetClientEyePosition(client, VecPos_client);
-			gDistance[client] = GetVectorDistance(VecPos_grabbed, VecPos_client);
-			float vecView[3]; float vecFwd[3]; float vecPos[3]; float vecVel[3];
-			
-			GetClientEyeAngles(client, vecView);
-			GetAngleVectors(vecView, vecFwd, NULL_VECTOR, NULL_VECTOR);
-			GetClientEyePosition(client, vecPos);
-			
-			vecPos[0] += vecFwd[0] * gDistance[client];
-			vecPos[1] += vecFwd[1] * gDistance[client];
-			vecPos[2] += vecFwd[2] * gDistance[client];
-			
-			GetEntPropVector(grabbed, Prop_Send, "m_vecOrigin", vecFwd);
-			
-			SubtractVectors(vecPos, vecFwd, vecVel);
-			ScaleVector(vecVel, 10.0);
-			
-			TeleportEntity(grabbed, NULL_VECTOR, NULL_VECTOR, vecVel);
-			
-			//TeleportEntity(grabbed, NULL_VECTOR, NULL_VECTOR, Float: { 0.0, 0.0, 0.0 } );
-		}
-	}
-	*/
 }
-
+public Action Command_Grab(client, args)
+{
+	// make sure client is not spectating
+	if (!IsPlayerAlive(client))
+		return Plugin_Handled;
+	
+	
+	// find entity
+	int ent = TraceRayToEntity(client, 80.0);
+	if (ent == -1)
+		return Plugin_Handled;
+	
+	// only grab physics entities
+	char edictname[128];
+	GetEdictClassname(ent, edictname, 128);
+	if (strncmp("prop_", edictname, 5, false) == 0)
+	{
+		// grab entity
+		g_pGrabbedEnt[client] = ent;
+		SetEntProp(g_pGrabbedEnt[client], Prop_Data, "m_CollisionGroup", 2);
+		SetEntityRenderMode(g_pGrabbedEnt[client], RENDER_TRANSCOLOR);
+		SetEntityRenderColor(g_pGrabbedEnt[client], 255, 255, 255, 128);
+		g_bPropBeingHeld[ent] = true;
+	}
+	return Plugin_Handled;
+}
+public Action Command_UnGrab(client, args)
+{
+	// make sure client is not spectating
+	if (!IsPlayerAlive(client))
+		return Plugin_Handled;
+	
+	//SetEntityRenderMode(g_pGrabbedEnt[client], RENDER_TRANSCOLOR);
+	if (IsValidEntity(g_pGrabbedEnt[client])) {
+		SetEntityRenderColor(g_pGrabbedEnt[client], 255, 255, 255, 255);
+		SetEntProp(g_pGrabbedEnt[client], Prop_Data, "m_CollisionGroup", 5);
+		g_bPropBeingHeld[client] = false;
+		g_pGrabbedEnt[client] = -1;
+	}
+	
+	return Plugin_Handled;
+}
 //This for physical entities
 stock TraceRayToEntity(int iClient, float Distance) {
 	float vecEyeAngle[3];
@@ -193,7 +236,7 @@ stock int EntityNailAttachTo(int client, int iEnt) {
 			TR_GetEndPosition(end, INVALID_HANDLE);
 		}
 		char strName[126], strClass[64];
-		if (g_bCount[iEnt] < 2) {
+		if (g_bCount[iEnt] < 2 && g_pGrabbedEnt[client] == -1) {
 			int ent = CreateEntityByName("prop_dynamic_override");
 			DispatchKeyValue(ent, "model", "models/crossbow_bolt.mdl");
 			DispatchKeyValue(ent, "target", strName);
@@ -209,9 +252,20 @@ stock int EntityNailAttachTo(int client, int iEnt) {
 			AcceptEntityInput(ent, "SetParent");
 			TF2_CreateGlow(ent);
 			SetEntPropString(iEnt, Prop_Data, "m_iName", oldEntName);
-			g_eReleaseFreeze[iEnt] = false; //Cuz it's nailed
+			g_bPropNailed[iEnt] = true; //Cuz it's nailed
 			PrintHintText(client, "Succesfully nailed classname :%s, PropId:%d, With:%d/Classname:%s", classNameCheck, iEnt, ent, classname2);
 			EmitSoundToAll("weapons/crowbar/crowbar_impact1.wav", client, SNDCHAN_AUTO, SNDLEVEL_NORMAL, SND_NOFLAGS, SNDVOL_NORMAL, 100, client, end, NULL_VECTOR, true, 0.0);
+			SetEntityMoveType(iEnt, MOVETYPE_NONE);
+			SetEntProp(iEnt, Prop_Data, "m_takedamage", 2);
+			SetEntProp(iEnt, Prop_Data, "m_iHealth", 500);
+			int iGlow = TF2_CreateGlow(iEnt);
+			if (IsValidEntity(iGlow))
+			{
+				g_iPlayerGlowEntity[client] = EntIndexToEntRef(iGlow);
+				SDKHook(client, SDKHook_PreThink, OnPlayerThink);
+			}
+			
+			SDKHook(iEnt, SDKHook_OnTakeDamage, OnTakeDamage);
 			return ent;
 		}
 		HookSingleEntityOutput(iEnt, "OnBreak", propBreak);
@@ -219,26 +273,34 @@ stock int EntityNailAttachTo(int client, int iEnt) {
 		PrintHintText(client, "Failed at nailing classname:%s", classNameCheck);
 	}
 }
-stock int AttachTo(int iEnt) {
-	char classname[64];
-	float StartPos[3];
-	float Below[3];
-	
-	GetEntityClassname(iEnt, classname, sizeof(classname));
-	if (StrContains(classname, "physics", false) != -1 && !g_eReleaseFreeze[iEnt]) {
-		GetEntPropVector(iEnt, Prop_Send, "m_vecOrigin", StartPos);
-		Below[0] = StartPos[0];
-		Below[1] = StartPos[1];
-		Below[2] = StartPos[2] - 10.0;
-		TR_TraceRayFilter(StartPos, Below, MASK_PLAYERSOLID, RayType_EndPoint, TraceRayDontHitSelf, iEnt);
-		if (TR_DidHit(INVALID_HANDLE)) {
-			int index = TR_GetEntityIndex(INVALID_HANDLE);
-			PrintToChatAll("%d", index);
-		}
+public Action OnPlayerThink(int client)
+{
+	int iGlow = EntRefToEntIndex(g_iPlayerGlowEntity[client]);
+	if (iGlow != INVALID_ENT_REFERENCE)
+	{
+		float flRate = 10.0;
+		
+		int color[4];
+		color[0] = RoundToNearest(Cosine((GetGameTime() * flRate) + client + 0) * 127.5 + 127.5);
+		color[1] = RoundToNearest(Cosine((GetGameTime() * flRate) + client + 2) * 127.5 + 127.5);
+		color[2] = RoundToNearest(Cosine((GetGameTime() * flRate) + client + 4) * 127.5 + 127.5);
+		color[3] = 255;
+		
+		SetVariantColor(color);
+		AcceptEntityInput(iGlow, "SetGlowColor");
 	}
 }
-stock GrabProp(int iClient, int iEnt) {
+public Action OnTakeDamage(int victim, int &attacker, int &inflictor, float &damage, int &damagetype)
+{
+	int hpVictim = GetEntProp(victim, Prop_Data, "m_iHealth");
+	PrintHintTextToAll("PropHealth:%d", hpVictim);
+	PrintToChatAll("%d, %d", attacker, victim);
 	
+	if (GetClientTeam(attacker) == g_iHumTeamIndex) {
+		damage = 1.0;
+		return Plugin_Changed;
+	}
+	return Plugin_Continue;
 }
 stock int TF2_CreateGlow(int iEnt)
 {
@@ -274,8 +336,10 @@ stock int TF2_CreateGlow(int iEnt)
 
 UpgradeStatusOfProp(iEntity) {
 	if (iEntity != -1) {
-		HookSingleEntityOutput(iEntity, "OnBreak", propBreak);
-		if (!g_eReleaseFreeze[iEntity]) {
+		if (g_bPropNailed[iEntity]) {
+			HookSingleEntityOutput(iEntity, "OnBreak", propBreak);
+		}
+		else if (!g_bPropNailed[iEntity]) {
 			//SetEntityMoveType(iEntity, MOVETYPE_NONE);
 			SetEntProp(iEntity, Prop_Data, "m_iHealth", 100);
 			SetEntProp(iEntity, Prop_Data, "m_takedamage", 2);
@@ -320,6 +384,7 @@ stock RemoveRemainNails(int iEnt) {
 		
 		if (GetEntPropEnt(index, Prop_Data, "m_hMoveParent") == iEnt) {
 			AcceptEntityInput(index, "Kill");
+			g_bPropNailed[iEnt] = false;
 			PrintToChatAll("Nail Index:%d, Nail parented to :%d", index, iEnt);
 		}
 		//PrintToChatAll("Nail removed!");
@@ -334,4 +399,113 @@ public bool TraceRayDontHitSelf(entity, mask, any:data)
 	}
 	
 	return true; // It didn't hit itself
+}
+public Action UpdateObjects(Handle timer)
+
+{
+	float vecDir[3]; float vecPos[3]; float vecVel[3]; // vectors
+	float viewang[3]; // angles
+	int i;
+	float distance = 80.0;
+	for (i = 0; i < MAXPLAYERS; i++)
+	{
+		if (IsValidClient(i) && IsClientInGame(i)) {
+			if (g_pGrabbedEnt[i] > 0)
+			{
+				if (IsValidEdict(g_pGrabbedEnt[i]) && IsValidEntity(g_pGrabbedEnt[i]))
+				{
+					// get client info
+					GetClientEyeAngles(i, viewang);
+					GetAngleVectors(viewang, vecDir, NULL_VECTOR, NULL_VECTOR);
+					GetClientEyePosition(i, vecPos);
+					
+					// update object 
+					vecPos[0] += vecDir[0] * distance;
+					vecPos[1] += vecDir[1] * distance;
+					vecPos[2] += vecDir[2] * distance;
+					
+					GetEntPropVector(g_pGrabbedEnt[i], Prop_Send, "m_vecOrigin", vecDir);
+					
+					SubtractVectors(vecPos, vecDir, vecVel);
+					ScaleVector(vecVel, 10.0);
+					
+					TeleportEntity(g_pGrabbedEnt[i], NULL_VECTOR, NULL_VECTOR, vecVel);
+					g_bPropBeingHeld[i] = true;
+				}
+				else
+				{
+					g_bPropBeingHeld[i] = false;
+					g_pGrabbedEnt[i] = -1;
+				}
+				
+			}
+		}
+	}
+	
+	return Plugin_Continue;
+}
+stock bool IsValidClient(client, bool nobots = true)
+{
+	if (client <= 0 || client > MaxClients || !IsClientConnected(client) || (nobots && IsFakeClient(client)))
+	{
+		return false;
+	}
+	return IsClientInGame(client);
+}
+zombimod()
+{
+	g_iMapPrefixType = 0;
+	char mapv[32];
+	GetCurrentMap(mapv, sizeof(mapv));
+	if (!StrContains(mapv, "zf_", false)) {
+		g_iMapPrefixType = 1;
+	}
+	else if (!StrContains(mapv, "szf_", false)) {
+		g_iMapPrefixType = 2;
+	}
+	else if (!StrContains(mapv, "zm_", false)) {
+		g_iMapPrefixType = 3;
+	}
+	else if (!StrContains(mapv, "zom_", false)) {
+		g_iMapPrefixType = 4;
+	}
+	else if (!StrContains(mapv, "zs_", false)) {
+		g_iMapPrefixType = 5;
+	}
+	else if (!StrContains(mapv, "ze_", false)) {
+		g_iMapPrefixType = 6;
+		PrintToServer("\n\n\n\n      ZOMBIE ESCAPE MOD ON \n\n\n");
+	}
+	
+	if (g_iMapPrefixType == 1)
+		PrintToServer("\n\n\n      Great :) Found Map Prefix == ['ZF']\n\n\n");
+	else if (g_iMapPrefixType == 2)
+		PrintToServer("\n\n\n      Great :) Found Map Prefix == ['SZF']\n\n\n");
+	else if (g_iMapPrefixType == 3)
+		PrintToServer("\n\n\n      Great :) Found Map Prefix == ['ZM']zf\n\n\n");
+	else if (g_iMapPrefixType == 4)
+		PrintToServer("\n\n\n      Great :) Found Map Prefix == ['ZOM']\n\n\n");
+	else if (g_iMapPrefixType == 5)
+		PrintToServer("\n\n\n      Great :) Found Map Prefix ['ZS']\n\n\n");
+	else if (g_iMapPrefixType == 6)
+		PrintToServer("\n\n\n      Great :) Found Map Prefix ['ZE']\n\n\n");
+	else if (g_iMapPrefixType > 0) {
+		if (g_iMapPrefixType != 6) {
+		}
+	}
+	else if (g_iMapPrefixType == 0) {
+		PrintToServer("\n\n           ********WARNING!********     \n\n\n ***Zombie Map Recommended Current [MAPNAME] = [%s]***\n\n\n", mapv);
+	}
+}
+logGameRuleTeamRegister() {  //Registers the Team indexes (Most likely usage for OnMapStart() )
+	if (g_iMapPrefixType == 1 || g_iMapPrefixType == 2) {
+		g_iZomTeamIndex = 3; //We'll set Blue team as a zombie for those maps
+		g_iHumTeamIndex = 2; //We'll set Red team as a human for those maps
+		PrintToServer("\nGame Rules Changed, Zombie team is Blue, Human team is Red\n");
+	} //If the map is ZF or ZM 
+	else if (g_iMapPrefixType == 3 || g_iMapPrefixType == 4 || g_iMapPrefixType == 5 || g_iMapPrefixType == 6) {
+		g_iZomTeamIndex = 2; //We'll set Red team as a zombie for those maps
+		g_iHumTeamIndex = 3; //We'll set Blue team as a zombie for those maps
+		PrintToServer("\nGame Rules Changed, Zombie team is Red, Human team is Blue\n");
+	} // If the map is ZM, ZS, ZOM, ZE
 } 
