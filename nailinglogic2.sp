@@ -12,6 +12,7 @@
 #include <tf2>
 #include <tf2_stocks>
 #include <sdkhooks>
+
 new g_offsCollisionGroup;
 
 public Plugin myinfo = 
@@ -22,7 +23,8 @@ public Plugin myinfo =
 	version = PLUGIN_VERSION, 
 	url = ""
 };
-int g_iPlayerGlowEntity[MAXPLAYERS + 1];
+
+
 int g_iMapPrefixType = 0;
 int g_iZomTeamIndex;
 int g_iHumTeamIndex;
@@ -34,11 +36,15 @@ bool g_bPropBeingHeld[2048 + 1] =  { false, ... };
 public void OnPluginStart()
 {
 	g_offsCollisionGroup = FindSendPropInfo("CBaseEntity", "m_CollisionGroup");
+	if (g_offsCollisionGroup == -1) {
+		PrintToServer("\n\n\n AFADSFADSFSA \n\n\n");
+	}
 	HookEvent("teamplay_round_start", OnRound);
 	HookEvent("player_death", PlayerDeath);
-	HookEvent("player_spawn", PlayerSpawn);
+	HookEvent("player_spawn", PlayerSpawn, EventHookMode_Post);
 	RegConsoleCmd("+grab", Command_Grab);
 	RegConsoleCmd("-grab", Command_UnGrab);
+	RegConsoleCmd("phrase", Command_Phrase);
 }
 
 public void OnMapStart() {
@@ -74,6 +80,7 @@ public Action OnRound(Handle event, const String:name[], bool dontBroadcast) {
 	for (int i = 0; i <= 2048; i++) {
 		g_bCount[i] = 0;
 		g_bPropBeingHeld[i] = false;
+		g_bPropNailed[i] = false;
 	}
 	for (int j = 1; j <= MAXPLAYERS; j++) {
 		if (IsValidClient(j) && IsClientInGame(j)) {
@@ -85,6 +92,12 @@ public Action PlayerSpawn(Handle event, const String:name[], bool dontBroadcast)
 {
 	int client;
 	client = GetClientOfUserId(GetEventInt(event, "userid"));
+	if (GetClientTeam(client) == g_iHumTeamIndex) {
+		SetEntData(client, g_offsCollisionGroup, 2, 4, true);
+	}
+	else if (GetClientTeam(client) == g_iZomTeamIndex) {
+		SetEntData(client, g_offsCollisionGroup, 5, 4, true);
+	}
 	// reset object held
 	g_pGrabbedEnt[client] = -1;
 	g_bPropBeingHeld[client] = false;
@@ -105,9 +118,12 @@ public Action OnPlayerRunCmd(client, &buttons) {
 		if (TracedEntity != -1) {
 			float vec[3];
 			GetClientEyeAngles(client, vec);
-			if (vec[0] > 46.0 && g_pGrabbedEnt[client] == -1 && GetClientTeam(client) == g_iHumTeamIndex) {  //Must look downwards, must not carry anything while nailing anything.
-				EntityNailAttachTo(client, TracedEntity);
-				UpgradeStatusOfProp(TracedEntity);
+			if (GetClientTeam(client) == g_iHumTeamIndex) {  //Must look downwards, must not carry anything while nailing anything. vec[0] > 46.0 &&  g_pGrabbedEnt[client] == -1 &&  
+				int TraceConfirm = TraceRayToEntityToConfirmNail(client, 80.0);
+				if (TraceConfirm == 0) {
+					EntityNailAttachTo(client, TracedEntity);
+					UpgradeStatusOfProp(TracedEntity);
+				}
 			}
 		}
 	}
@@ -127,7 +143,7 @@ public Action Command_Grab(client, args)
 	// only grab physics entities
 	char edictname[128];
 	GetEdictClassname(ent, edictname, 128);
-	if (strncmp("prop_", edictname, 5, false) == 0)
+	if (strncmp("prop_", edictname, 5, false) == 0 && !g_bPropNailed[ent])
 	{
 		// grab entity
 		g_pGrabbedEnt[client] = ent;
@@ -154,6 +170,28 @@ public Action Command_UnGrab(client, args)
 	
 	return Plugin_Handled;
 }
+public Action Command_Phrase(client, args)
+{
+	if (!IsPlayerAlive(client))
+		return Plugin_Handled;
+	
+	int iEnt = TraceRayToEntity(client, 80.0);
+	if (IsValidClient(client) && IsStuckInEnt(client, iEnt) && GetClientTeam(client) == g_iHumTeamIndex && IsValidEntity(iEnt)) {
+		CreateTimer(0.5, PhasingTimer, iEnt, TIMER_FLAG_NO_MAPCHANGE);
+		SetEntProp(iEnt, Prop_Data, "m_CollisionGroup", 2);
+		PrintToChat(client, "You're stuck'");
+	} else {
+		PrintToChat(client, "You're  not stuck'");
+	}
+	
+	return Plugin_Handled;
+}
+
+public Action PhasingTimer(Handle timer, any:iEnt) {
+	SetEntProp(iEnt, Prop_Data, "m_CollisionGroup", 5);
+}
+public bool OnCollide(client, collisiongroup, contentsmask, bool:result) {
+}
 //This for physical entities
 stock TraceRayToEntity(int iClient, float Distance) {
 	float vecEyeAngle[3];
@@ -162,7 +200,7 @@ stock TraceRayToEntity(int iClient, float Distance) {
 	GetClientEyePosition(iClient, vecEyePos); //Eyes
 	GetClientEyeAngles(iClient, vecEyeAngle); //Where the client is looking at
 	vecEyePos[2] += 10;
-	TR_TraceRayFilter(vecEyePos, vecEyeAngle, MASK_SOLID, RayType_Infinite, TraceRayHitSelf, iClient);
+	TR_TraceRayFilter(vecEyePos, vecEyeAngle, MASK_ALL, RayType_Infinite, TraceRayHitSelf, iClient);
 	
 	if (TR_DidHit(INVALID_HANDLE)) {
 		float EndPos[3];
@@ -182,36 +220,48 @@ stock TraceRayToEntity(int iClient, float Distance) {
 	return -1;
 	
 }
+
 //This for walls
 stock TraceRayToEntityToConfirmNail(int iClient, float Distance) {
 	float vecEyeAngle[3];
-	float vecEyePos[3];
+	float OriginalPos[3];
 	
+	GetClientAbsOrigin(iClient, OriginalPos);
 	//-2 means it's not a floor. Or the distance is far away than the initial distance limit
 	//-1 means it's floor or wall. 
-	GetClientEyePosition(iClient, vecEyePos); //Eyes
+	//GetClientEyePosition(iClient, vecEyePos); //Eyes
 	GetClientEyeAngles(iClient, vecEyeAngle); //Where the client is looking at
-	vecEyePos[2] += 10;
-	TR_TraceRayFilter(vecEyePos, vecEyeAngle, MASK_SOLID, RayType_Infinite, TraceRayHitSelf, iClient);
+	//vecEyePos[2] += 10;
+	//vecEyePos[1] -= 10;
+	//TR_TraceRayFilter(vecEyePos, vecEyeAngle, MASK_SOLID, RayType_Infinite, TraceRayHitSelf, iClient);
+	TR_TraceRayFilter(OriginalPos, vecEyeAngle, MASK_SOLID, RayType_Infinite, TraceRayNoPlayers, iClient);
 	if (TR_DidHit(INVALID_HANDLE)) {
 		float EndPos[3];
-		vecEyePos[2] -= 10;
+		//vecEyePos[2] -= 10;
+		//OriginalPos[2] += 10;
 		char surfaceName[128];
 		int iEnt = TR_GetEntityIndex(INVALID_HANDLE);
 		TR_GetEndPosition(EndPos, INVALID_HANDLE);
 		TR_GetSurfaceName(null, surfaceName, sizeof(surfaceName));
-		PrintHintText(iClient, "%s", surfaceName);
-		float flDistance = GetVectorDistance(vecEyePos, EndPos);
+		//PrintHintText(iClient, "%s", surfaceName);
+		float flDistance = GetVectorDistance(OriginalPos, EndPos);
 		//GetEntPropVector(iEnt, Prop_Send, "m_vecOrigin", EndPos);
-		if (StrContains(surfaceName, "floor", false) != -1 && flDistance < Distance) {
-			PrintToChat(iClient, "Distance:%f", flDistance);
-			return -1;
+		if (iEnt == 0 && flDistance < Distance) {
+			PrintToChat(iClient, "Distance:%f, AimingAt:%d", flDistance, iEnt);
+			return iEnt;
 		}
 		return -2;
 	}
 	return -2;
 }
-
+public bool TraceRayNoPlayers(entity, mask, any:data)
+{
+	if (entity == data || (entity >= 1 && entity <= MaxClients))
+	{
+		return false;
+	}
+	return true;
+}
 public bool TraceRayHitSelf(entity, mask, any:data) {
 	return (entity != data);
 }
@@ -230,13 +280,15 @@ stock int EntityNailAttachTo(int client, int iEnt) {
 		
 		GetClientEyePosition(client, start);
 		GetClientEyeAngles(client, angle);
-		TR_TraceRayFilter(start, angle, MASK_SOLID, RayType_Infinite, TraceEntityFilterPlayer, client);
+		TR_TraceRayFilter(start, angle, MASK_ALL, RayType_Infinite, TraceEntityFilterPlayer, client);
 		if (TR_DidHit(INVALID_HANDLE))
 		{
 			TR_GetEndPosition(end, INVALID_HANDLE);
 		}
 		char strName[126], strClass[64];
-		if (g_bCount[iEnt] < 2 && g_pGrabbedEnt[client] == -1) {
+		float OriginalPos[3];
+		float flAng[3];
+		if (g_bCount[iEnt] < 2) {  // && g_pGrabbedEnt[client] == -1
 			int ent = CreateEntityByName("prop_dynamic_override");
 			DispatchKeyValue(ent, "model", "models/crossbow_bolt.mdl");
 			DispatchKeyValue(ent, "target", strName);
@@ -246,24 +298,28 @@ stock int EntityNailAttachTo(int client, int iEnt) {
 			GetEntityClassname(ent, classname2, sizeof(classname2));
 			SetEntProp(ent, Prop_Data, "m_iHealth", 100);
 			SetEntProp(ent, Prop_Data, "m_takedamage", 2);
+			
 			Format(strName, sizeof(strName), "%s%i", strClass, iEnt);
 			DispatchKeyValue(iEnt, "targetname", strName);
 			SetVariantString(strName);
 			AcceptEntityInput(ent, "SetParent");
+			
+			
 			TF2_CreateGlow(ent);
 			SetEntPropString(iEnt, Prop_Data, "m_iName", oldEntName);
 			g_bPropNailed[iEnt] = true; //Cuz it's nailed
 			PrintHintText(client, "Succesfully nailed classname :%s, PropId:%d, With:%d/Classname:%s", classNameCheck, iEnt, ent, classname2);
 			EmitSoundToAll("weapons/crowbar/crowbar_impact1.wav", client, SNDCHAN_AUTO, SNDLEVEL_NORMAL, SND_NOFLAGS, SNDVOL_NORMAL, 100, client, end, NULL_VECTOR, true, 0.0);
+			Command_UnGrab(client, 0);
+			GetEntPropVector(iEnt, Prop_Send, "m_vecOrigin", OriginalPos);
+			GetEntPropVector(iEnt, Prop_Data, "m_angRotation", flAng);
+			
+			
 			SetEntityMoveType(iEnt, MOVETYPE_NONE);
 			SetEntProp(iEnt, Prop_Data, "m_takedamage", 2);
 			SetEntProp(iEnt, Prop_Data, "m_iHealth", 500);
-			int iGlow = TF2_CreateGlow(iEnt);
-			if (IsValidEntity(iGlow))
-			{
-				g_iPlayerGlowEntity[client] = EntIndexToEntRef(iGlow);
-				SDKHook(client, SDKHook_PreThink, OnPlayerThink);
-			}
+			
+			
 			
 			SDKHook(iEnt, SDKHook_OnTakeDamage, OnTakeDamage);
 			return ent;
@@ -273,23 +329,7 @@ stock int EntityNailAttachTo(int client, int iEnt) {
 		PrintHintText(client, "Failed at nailing classname:%s", classNameCheck);
 	}
 }
-public Action OnPlayerThink(int client)
-{
-	int iGlow = EntRefToEntIndex(g_iPlayerGlowEntity[client]);
-	if (iGlow != INVALID_ENT_REFERENCE)
-	{
-		float flRate = 10.0;
-		
-		int color[4];
-		color[0] = RoundToNearest(Cosine((GetGameTime() * flRate) + client + 0) * 127.5 + 127.5);
-		color[1] = RoundToNearest(Cosine((GetGameTime() * flRate) + client + 2) * 127.5 + 127.5);
-		color[2] = RoundToNearest(Cosine((GetGameTime() * flRate) + client + 4) * 127.5 + 127.5);
-		color[3] = 255;
-		
-		SetVariantColor(color);
-		AcceptEntityInput(iGlow, "SetGlowColor");
-	}
-}
+
 public Action OnTakeDamage(int victim, int &attacker, int &inflictor, float &damage, int &damagetype)
 {
 	int hpVictim = GetEntProp(victim, Prop_Data, "m_iHealth");
@@ -348,6 +388,7 @@ UpgradeStatusOfProp(iEntity) {
 }
 public void propBreak(const char[] output, int caller, int activator, float delay)
 {
+	g_bPropNailed[caller] = false;
 	RemoveRemainNails(caller);
 	UnhookSingleEntityOutput(caller, "OnBreak", propBreak);
 }
@@ -508,4 +549,20 @@ logGameRuleTeamRegister() {  //Registers the Team indexes (Most likely usage for
 		g_iHumTeamIndex = 3; //We'll set Blue team as a zombie for those maps
 		PrintToServer("\nGame Rules Changed, Zombie team is Red, Human team is Blue\n");
 	} // If the map is ZM, ZS, ZOM, ZE
+}
+
+stock bool IsStuckInEnt(client, ent) {
+	float vecMin[3]; float vecMax[3]; float vecOrigin[3];
+	
+	GetClientMins(client, vecMin);
+	GetClientMaxs(client, vecMax);
+	
+	GetClientAbsOrigin(client, vecOrigin);
+	
+	TR_TraceHullFilter(vecOrigin, vecOrigin, vecMin, vecMax, MASK_ALL, TraceRayDontHitPlayerAndWorld, ent);
+	return TR_DidHit();
+}
+
+public bool TraceRayDontHitPlayerAndWorld(entityhit, mask) {
+	return entityhit > MaxClients;
 } 
